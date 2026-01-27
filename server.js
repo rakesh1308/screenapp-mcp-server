@@ -147,7 +147,9 @@ app.get('/health', (req, res) => {
 app.post('/', authenticateRequest, async (req, res) => {
   const { jsonrpc, method, params, id } = req.body;
 
-  console.log(`[MCP] Received method: ${method}, params:`, JSON.stringify(params).substring(0, 100));
+  console.log(`\n[MCP] ================================`);
+  console.log(`[MCP] Incoming request: method=${method}, id=${id}`);
+  console.log(`[MCP] ================================`);
 
   // Validate JSON-RPC format
   if (jsonrpc !== '2.0' || !method) {
@@ -164,40 +166,74 @@ app.post('/', authenticateRequest, async (req, res) => {
   try {
     let result;
 
-    switch (method) {
-      // List tools - multiple method names supported
-      case 'tools/list':
-      case 'list_tools':
-      case 'tools_list':
-      case 'getTools':
-        console.log('[MCP] Returning tools list');
-        result = tools;
-        break;
+    // Normalize method name
+    const normalizedMethod = method.toLowerCase().trim();
 
-      // Execute tool - multiple method names supported
-      case 'tools/execute':
-      case 'execute_tool':
-      case 'call_tool':
-      case 'tool_call':
-        const toolName = params?.name || params?.tool;
-        const toolArgs = params?.arguments || params?.args || {};
-        console.log(`[MCP] Executing tool: ${toolName} with args:`, toolArgs);
-        result = await executeTool(toolName, toolArgs);
-        break;
+    // ============= Handle MCP Protocol Methods =============
 
-      default:
-        console.warn(`[MCP] Unknown method: ${method}`);
-        return res.status(400).json({
-          jsonrpc: '2.0',
-          error: {
-            code: -32601,
-            message: 'Method not found'
-          },
-          id: id
-        });
+    // Handle initialization - MCP protocol handshake (REQUIRED)
+    if (normalizedMethod === 'initialize') {
+      console.log('[MCP] ✅ Handling initialize handshake');
+      result = {
+        protocolVersion: '2025-06-18',
+        capabilities: {
+          tools: {}
+        },
+        serverInfo: {
+          name: 'ScreenApp MCP Server',
+          version: '1.0.0'
+        }
+      };
+    }
+    // Handle tools/list - return the tools array
+    else if (normalizedMethod === 'tools/list' || normalizedMethod === 'list_tools' || normalizedMethod === 'tools_list') {
+      console.log('[MCP] ✅ Handling tools list request');
+      result = {
+        tools: tools
+      };
+    }
+    // Handle resource/read - LobeChat might send this for text resources
+    else if (normalizedMethod === 'resource/read' || normalizedMethod === 'resources/read') {
+      console.log('[MCP] ✅ Handling resource/read request');
+      result = {
+        contents: [
+          {
+            uri: 'screenapp://recordings',
+            mimeType: 'application/json',
+            text: JSON.stringify(tools)
+          }
+        ]
+      };
+    }
+    // Handle tool execution
+    else if (normalizedMethod === 'tools/call' || normalizedMethod === 'tool/call' || normalizedMethod === 'call_tool' || normalizedMethod === 'tools/execute' || normalizedMethod === 'execute_tool') {
+      const toolName = params?.name || params?.tool;
+      const toolArgs = params?.arguments || params?.args || {};
+      console.log(`[MCP] ✅ Executing tool: ${toolName}`);
+      result = await executeTool(toolName, toolArgs);
+    }
+    // Catch-all: flexible handling for any method
+    else if (normalizedMethod.includes('list') || normalizedMethod.includes('manifest')) {
+      console.log(`[MCP] ✅ Assuming list request for method: ${method}`);
+      result = {
+        tools: tools
+      };
+    }
+    else if (normalizedMethod.includes('call') || normalizedMethod.includes('execute')) {
+      console.log(`[MCP] ✅ Assuming execute request for method: ${method}`);
+      const toolName = params?.name || params?.tool;
+      const toolArgs = params?.arguments || params?.args || {};
+      result = await executeTool(toolName, toolArgs);
+    }
+    else {
+      // Last resort - return tools list as fallback
+      console.log(`[MCP] ⚠️  Unrecognized method "${method}" - returning tools list as fallback`);
+      result = {
+        tools: tools
+      };
     }
 
-    console.log(`[MCP] Method ${method} executed successfully`);
+    console.log(`[MCP] ✅ Successfully handled method: ${method}\n`);
 
     // Success response
     res.json({
@@ -207,14 +243,13 @@ app.post('/', authenticateRequest, async (req, res) => {
     });
 
   } catch (error) {
-    console.error(`[MCP] Error handling JSON-RPC method ${method}:`, error.message);
+    console.error(`[MCP] ❌ Error handling method ${method}:`, error.message);
     
     res.status(500).json({
       jsonrpc: '2.0',
       error: {
         code: -32603,
-        message: 'Internal error',
-        data: error.message
+        message: 'Internal error: ' + error.message
       },
       id: id
     });
@@ -324,7 +359,6 @@ async function getTranscript({ recording_id, format = 'text' } = {}) {
   try {
     if (!recording_id) throw new Error('recording_id parameter is required');
 
-    // Get full recording data which includes transcript
     const response = await axios.get(
       `${SCREENAPP_BASE_URL}/recordings/${recording_id}/transcript`,
       {
@@ -345,7 +379,6 @@ async function getTranscript({ recording_id, format = 'text' } = {}) {
       wordCount: response.data.wordCount || 0
     };
   } catch (error) {
-    // Fallback: try to get from main recording endpoint
     try {
       const recording = await getRecording({ recording_id });
       return {
@@ -381,7 +414,6 @@ async function getSummary({ recording_id } = {}) {
       keyPoints: response.data.keyPoints || []
     };
   } catch (error) {
-    // Fallback: try to get from main recording endpoint
     try {
       const recording = await getRecording({ recording_id });
       return {
@@ -401,7 +433,6 @@ async function askRecording({ recording_id, question } = {}) {
     if (!recording_id) throw new Error('recording_id parameter is required');
     if (!question) throw new Error('question parameter is required');
 
-    // Get transcript and use it to answer
     const transcript = await getTranscript({ recording_id, format: 'text' });
     
     return {
@@ -419,7 +450,7 @@ async function askRecording({ recording_id, question } = {}) {
 // ============= Error Handling =============
 
 app.use((err, req, res, next) => {
-  console.error('Server error:', err);
+  console.error('[ERROR] Server error:', err);
   res.status(500).json({ 
     error: 'Internal server error',
     message: err.message 
@@ -436,15 +467,19 @@ app.use((req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
+  console.log(`\n${'='.repeat(60)}`);
   console.log(`✅ ScreenApp MCP Server running on port ${PORT}`);
+  console.log(`${'='.repeat(60)}`);
   console.log(`📊 Health check: http://localhost:${PORT}/health`);
-  console.log(`🛠️  MCP JSON-RPC 2.0 endpoint: http://localhost:${PORT}/`);
+  console.log(`🛠️  MCP JSON-RPC 2.0 endpoint: POST http://localhost:${PORT}/`);
   console.log(`🔐 Auth via X-API-Key header or ?token= query param`);
-  console.log(`\n📋 Supported methods:`);
-  console.log(`   - list_tools, tools/list, tools_list, getTools`);
-  console.log(`   - call_tool, tools/execute, execute_tool, tool_call`);
+  console.log(`\n📋 Supported MCP Methods:`);
+  console.log(`   • initialize - MCP protocol handshake`);
+  console.log(`   • tools/list - List available tools`);
+  console.log(`   • tools/call - Execute a tool`);
   console.log(`\n📋 Available tools:`);
   tools.forEach(tool => {
-    console.log(`   - ${tool.name}: ${tool.description}`);
+    console.log(`   • ${tool.name}`);
   });
+  console.log(`${'='.repeat(60)}\n`);
 });
