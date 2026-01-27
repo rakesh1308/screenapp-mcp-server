@@ -132,24 +132,6 @@ const tools = [
   }
 ];
 
-// ============= Root Endpoint - MCP Manifest =============
-// LobeChat sends GET and POST requests to this endpoint
-// No authentication needed for manifest
-const manifestResponse = {
-  name: 'ScreenApp MCP Server',
-  version: '1.0.0',
-  description: 'MCP wrapper for ScreenApp API - record management, transcription, and analysis',
-  tools: tools
-};
-
-app.get('/', (req, res) => {
-  res.json(manifestResponse);
-});
-
-app.post('/', (req, res) => {
-  res.json(manifestResponse);
-});
-
 // ============= Health Check (No Auth) =============
 
 app.get('/health', (req, res) => {
@@ -160,58 +142,90 @@ app.get('/health', (req, res) => {
   });
 });
 
-// ============= MCP Protocol - With Authentication =============
+// ============= MCP JSON-RPC 2.0 Handler =============
 
-// Get tools list (MCP endpoint)
-app.get('/mcp/tools', authenticateRequest, (req, res) => {
-  res.json({
-    tools: tools
-  });
-});
+app.post('/', authenticateRequest, async (req, res) => {
+  const { jsonrpc, method, params, id } = req.body;
 
-// Execute tool (MCP endpoint)
-app.post('/mcp/tools/execute', authenticateRequest, async (req, res) => {
-  const { tool, args } = req.body;
+  // Validate JSON-RPC format
+  if (jsonrpc !== '2.0' || !method) {
+    return res.status(400).json({
+      jsonrpc: '2.0',
+      error: {
+        code: -32600,
+        message: 'Invalid Request'
+      },
+      id: id || null
+    });
+  }
 
   try {
     let result;
 
-    switch (tool) {
-      case 'list_recordings':
-        result = await listRecordings(args);
+    switch (method) {
+      case 'tools/list':
+        result = tools;
         break;
-      case 'search_recordings':
-        result = await searchRecordings(args);
+
+      case 'tools/execute':
+        result = await executeTool(params.name, params.arguments || {});
         break;
-      case 'get_recording':
-        result = await getRecording(args);
-        break;
-      case 'get_transcript':
-        result = await getTranscript(args);
-        break;
-      case 'get_summary':
-        result = await getSummary(args);
-        break;
-      case 'ask_recording':
-        result = await askRecording(args);
-        break;
+
       default:
-        return res.status(400).json({ error: `Unknown tool: ${tool}` });
+        return res.status(400).json({
+          jsonrpc: '2.0',
+          error: {
+            code: -32601,
+            message: 'Method not found'
+          },
+          id: id
+        });
     }
 
-    res.json({ success: true, data: result });
+    // Success response
+    res.json({
+      jsonrpc: '2.0',
+      result: result,
+      id: id
+    });
+
   } catch (error) {
-    console.error(`Error executing tool ${tool}:`, error.message);
+    console.error(`Error handling JSON-RPC method ${method}:`, error.message);
+    
     res.status(500).json({
-      success: false,
-      error: error.message || 'Tool execution failed'
+      jsonrpc: '2.0',
+      error: {
+        code: -32603,
+        message: 'Internal error',
+        data: error.message
+      },
+      id: id
     });
   }
 });
 
-// ============= Tool Implementations =============
+// ============= Tool Execution =============
 
-async function listRecordings({ limit = 20, offset = 0 }) {
+async function executeTool(toolName, args) {
+  switch (toolName) {
+    case 'list_recordings':
+      return await listRecordings(args);
+    case 'search_recordings':
+      return await searchRecordings(args);
+    case 'get_recording':
+      return await getRecording(args);
+    case 'get_transcript':
+      return await getTranscript(args);
+    case 'get_summary':
+      return await getSummary(args);
+    case 'ask_recording':
+      return await askRecording(args);
+    default:
+      throw new Error(`Unknown tool: ${toolName}`);
+  }
+}
+
+async function listRecordings({ limit = 20, offset = 0 } = {}) {
   try {
     const response = await axios.get(
       `${SCREENAPP_BASE_URL}/recordings`,
@@ -238,8 +252,10 @@ async function listRecordings({ limit = 20, offset = 0 }) {
   }
 }
 
-async function searchRecordings({ query, limit = 10 }) {
+async function searchRecordings({ query, limit = 10 } = {}) {
   try {
+    if (!query) throw new Error('Query parameter is required');
+
     // First, get all recordings
     const allRecordings = await listRecordings({ limit: 100, offset: 0 });
     
@@ -267,8 +283,10 @@ async function searchRecordings({ query, limit = 10 }) {
   }
 }
 
-async function getRecording({ recording_id }) {
+async function getRecording({ recording_id } = {}) {
   try {
+    if (!recording_id) throw new Error('recording_id parameter is required');
+
     const response = await axios.get(
       `${SCREENAPP_BASE_URL}/recordings/${recording_id}`,
       {
@@ -285,8 +303,10 @@ async function getRecording({ recording_id }) {
   }
 }
 
-async function getTranscript({ recording_id, format = 'text' }) {
+async function getTranscript({ recording_id, format = 'text' } = {}) {
   try {
+    if (!recording_id) throw new Error('recording_id parameter is required');
+
     // Get full recording data which includes transcript
     const response = await axios.get(
       `${SCREENAPP_BASE_URL}/recordings/${recording_id}/transcript`,
@@ -323,8 +343,10 @@ async function getTranscript({ recording_id, format = 'text' }) {
   }
 }
 
-async function getSummary({ recording_id }) {
+async function getSummary({ recording_id } = {}) {
   try {
+    if (!recording_id) throw new Error('recording_id parameter is required');
+
     const response = await axios.get(
       `${SCREENAPP_BASE_URL}/recordings/${recording_id}/summary`,
       {
@@ -357,8 +379,11 @@ async function getSummary({ recording_id }) {
   }
 }
 
-async function askRecording({ recording_id, question }) {
+async function askRecording({ recording_id, question } = {}) {
   try {
+    if (!recording_id) throw new Error('recording_id parameter is required');
+    if (!question) throw new Error('question parameter is required');
+
     // Get transcript and use it to answer
     const transcript = await getTranscript({ recording_id, format: 'text' });
     
@@ -378,7 +403,10 @@ async function askRecording({ recording_id, question }) {
 
 app.use((err, req, res, next) => {
   console.error('Server error:', err);
-  res.status(500).json({ error: 'Internal server error' });
+  res.status(500).json({ 
+    error: 'Internal server error',
+    message: err.message 
+  });
 });
 
 // ============= 404 Handler =============
@@ -393,7 +421,10 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ ScreenApp MCP Server running on port ${PORT}`);
   console.log(`📊 Health check: http://localhost:${PORT}/health`);
-  console.log(`🛠️  Root endpoint: http://localhost:${PORT}/`);
-  console.log(`🛠️  Tools endpoint: http://localhost:${PORT}/mcp/tools`);
+  console.log(`🛠️  MCP JSON-RPC 2.0 endpoint: http://localhost:${PORT}/`);
   console.log(`🔐 Auth via X-API-Key header or ?token= query param`);
+  console.log(`\n📋 Available tools:`);
+  tools.forEach(tool => {
+    console.log(`   - ${tool.name}: ${tool.description}`);
+  });
 });
