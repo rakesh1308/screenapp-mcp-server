@@ -132,6 +132,24 @@ const tools = [
   }
 ];
 
+// ============= Root Endpoint - MCP Manifest =============
+// LobeChat sends GET and POST requests to this endpoint
+// No authentication needed for manifest
+const manifestResponse = {
+  name: 'ScreenApp MCP Server',
+  version: '1.0.0',
+  description: 'MCP wrapper for ScreenApp API - record management, transcription, and analysis',
+  tools: tools
+};
+
+app.get('/', (req, res) => {
+  res.json(manifestResponse);
+});
+
+app.post('/', (req, res) => {
+  res.json(manifestResponse);
+});
+
 // ============= Health Check (No Auth) =============
 
 app.get('/health', (req, res) => {
@@ -139,17 +157,6 @@ app.get('/health', (req, res) => {
     status: 'ok',
     service: 'ScreenApp MCP Server',
     version: '1.0.0'
-  });
-});
-
-// ============= Root Endpoint - MCP Manifest (No Auth) =============
-
-app.get('/', (req, res) => {
-  res.json({
-    name: 'ScreenApp MCP Server',
-    version: '1.0.0',
-    description: 'MCP wrapper for ScreenApp API - record management, transcription, and analysis',
-    tools: tools
   });
 });
 
@@ -386,6 +393,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ ScreenApp MCP Server running on port ${PORT}`);
   console.log(`📊 Health check: http://localhost:${PORT}/health`);
+  console.log(`🛠️  Root endpoint: http://localhost:${PORT}/`);
   console.log(`🛠️  Tools endpoint: http://localhost:${PORT}/mcp/tools`);
   console.log(`🔐 Auth via X-API-Key header or ?token= query param`);
 });
