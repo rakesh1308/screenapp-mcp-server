@@ -147,6 +147,8 @@ app.get('/health', (req, res) => {
 app.post('/', authenticateRequest, async (req, res) => {
   const { jsonrpc, method, params, id } = req.body;
 
+  console.log(`[MCP] Received method: ${method}, params:`, JSON.stringify(params).substring(0, 100));
+
   // Validate JSON-RPC format
   if (jsonrpc !== '2.0' || !method) {
     return res.status(400).json({
@@ -163,15 +165,28 @@ app.post('/', authenticateRequest, async (req, res) => {
     let result;
 
     switch (method) {
+      // List tools - multiple method names supported
       case 'tools/list':
+      case 'list_tools':
+      case 'tools_list':
+      case 'getTools':
+        console.log('[MCP] Returning tools list');
         result = tools;
         break;
 
+      // Execute tool - multiple method names supported
       case 'tools/execute':
-        result = await executeTool(params.name, params.arguments || {});
+      case 'execute_tool':
+      case 'call_tool':
+      case 'tool_call':
+        const toolName = params?.name || params?.tool;
+        const toolArgs = params?.arguments || params?.args || {};
+        console.log(`[MCP] Executing tool: ${toolName} with args:`, toolArgs);
+        result = await executeTool(toolName, toolArgs);
         break;
 
       default:
+        console.warn(`[MCP] Unknown method: ${method}`);
         return res.status(400).json({
           jsonrpc: '2.0',
           error: {
@@ -182,6 +197,8 @@ app.post('/', authenticateRequest, async (req, res) => {
         });
     }
 
+    console.log(`[MCP] Method ${method} executed successfully`);
+
     // Success response
     res.json({
       jsonrpc: '2.0',
@@ -190,7 +207,7 @@ app.post('/', authenticateRequest, async (req, res) => {
     });
 
   } catch (error) {
-    console.error(`Error handling JSON-RPC method ${method}:`, error.message);
+    console.error(`[MCP] Error handling JSON-RPC method ${method}:`, error.message);
     
     res.status(500).json({
       jsonrpc: '2.0',
@@ -423,6 +440,9 @@ app.listen(PORT, () => {
   console.log(`📊 Health check: http://localhost:${PORT}/health`);
   console.log(`🛠️  MCP JSON-RPC 2.0 endpoint: http://localhost:${PORT}/`);
   console.log(`🔐 Auth via X-API-Key header or ?token= query param`);
+  console.log(`\n📋 Supported methods:`);
+  console.log(`   - list_tools, tools/list, tools_list, getTools`);
+  console.log(`   - call_tool, tools/execute, execute_tool, tool_call`);
   console.log(`\n📋 Available tools:`);
   tools.forEach(tool => {
     console.log(`   - ${tool.name}: ${tool.description}`);
