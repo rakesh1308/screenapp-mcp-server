@@ -23,8 +23,6 @@ const authenticateRequest = (req, res, next) => {
   next();
 };
 
-app.use(authenticateRequest);
-
 // MCP Tools Schema
 const tools = [
   {
@@ -134,17 +132,38 @@ const tools = [
   }
 ];
 
-// ============= API Endpoints =============
+// ============= Health Check (No Auth) =============
+
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok',
+    service: 'ScreenApp MCP Server',
+    version: '1.0.0'
+  });
+});
+
+// ============= Root Endpoint - MCP Manifest (No Auth) =============
+
+app.get('/', (req, res) => {
+  res.json({
+    name: 'ScreenApp MCP Server',
+    version: '1.0.0',
+    description: 'MCP wrapper for ScreenApp API - record management, transcription, and analysis',
+    tools: tools
+  });
+});
+
+// ============= MCP Protocol - With Authentication =============
 
 // Get tools list (MCP endpoint)
-app.get('/mcp/tools', (req, res) => {
+app.get('/mcp/tools', authenticateRequest, (req, res) => {
   res.json({
     tools: tools
   });
 });
 
 // Execute tool (MCP endpoint)
-app.post('/mcp/tools/execute', async (req, res) => {
+app.post('/mcp/tools/execute', authenticateRequest, async (req, res) => {
   const { tool, args } = req.body;
 
   try {
@@ -348,39 +367,21 @@ async function askRecording({ recording_id, question }) {
   }
 }
 
-// ============= Health Check =============
+// ============= Error Handling =============
 
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok',
-    service: 'ScreenApp MCP Server',
-    version: '1.0.0'
-  });
-});
-
-// ============= MCP Protocol Endpoints =============
-
-app.get('/', (req, res) => {
-  res.json({
-    name: 'ScreenApp MCP Server',
-    version: '1.0.0',
-    description: 'MCP wrapper for ScreenApp API - record management, transcription, and analysis',
-    endpoints: {
-      tools: '/mcp/tools',
-      execute: '/mcp/tools/execute',
-      health: '/health'
-    },
-    authentication: 'Bearer token via X-API-Key header or ?token= query param'
-  });
-});
-
-// Error handling
 app.use((err, req, res, next) => {
   console.error('Server error:', err);
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// Start server
+// ============= 404 Handler =============
+
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
+
+// ============= Start Server =============
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ ScreenApp MCP Server running on port ${PORT}`);
