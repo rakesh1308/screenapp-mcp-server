@@ -1,263 +1,106 @@
 """
-ScreenApp MCP Proxy Server
-Proxies requests to the official ScreenApp MCP server at https://mcp.screenapp.io
+ScreenApp MCP Server with API Key Authentication
 """
 
-import asyncio
-import json
-import os
-from typing import Any, Dict, Optional
-from datetime import datetime
+from fastmcp import FastMCP
 import httpx
-from dotenv import load_dotenv
+import os
+from typing import Optional, List
+import logging
 
-from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse, JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-load_dotenv()
-
-# ============================================================================
 # Configuration
-# ============================================================================
+SCREENAPP_API_KEY = os.getenv("SCREENAPP_API_KEY")
+SCREENAPP_API_BASE = "https://api.screenapp.io"
 
-# Official ScreenApp MCP Server
-SCREENAPP_MCP_URL = "https://mcp.screenapp.io/mcp"
-SCREENAPP_API_KEY = os.getenv("SCREENAPP_API_KEY", "")
+# Initialize FastMCP without OAuth (using API key in headers instead)
+mcp = FastMCP(name="ScreenApp", description="ScreenApp MCP server")
 
-app = FastAPI(
-    title="ScreenApp MCP Proxy Server",
-    description="Proxy to official ScreenApp MCP server for LobeChat compatibility",
-    version="1.0.0"
-)
-
-# Enable CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-# ============================================================================
-# Helper Functions
-# ============================================================================
-
-def get_headers() -> Dict[str, str]:
-    """Get headers for ScreenApp MCP requests"""
+async def get_headers() -> dict:
+    """Get headers with API key"""
     return {
         "Authorization": f"Bearer {SCREENAPP_API_KEY}",
         "Content-Type": "application/json"
     }
 
-
-# ============================================================================
-# FastAPI Endpoints
-# ============================================================================
-
-@app.get("/")
-async def root():
-    """Root endpoint with server info"""
-    return {
-        "name": "ScreenApp MCP Proxy Server",
-        "version": "1.0.0",
-        "protocol": "MCP over SSE",
-        "status": "running",
-        "upstream": SCREENAPP_MCP_URL,
-        "endpoints": {
-            "sse": "/sse",
-            "health": "/health",
-            "message": "/message"
-        }
-    }
-
-
-@app.get("/health")
-async def health():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
-        "upstream": SCREENAPP_MCP_URL,
-        "api_key_configured": bool(SCREENAPP_API_KEY)
-    }
-
-
-@app.options("/sse")
-async def sse_options():
-    """Handle CORS preflight for SSE endpoint"""
-    return JSONResponse(
-        content={"status": "ok"},
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type, Authorization",
-        }
-    )
-
-
-@app.get("/sse")
-async def sse_handler_get(request: Request):
-    """
-    Proxy SSE GET requests to official ScreenApp MCP
-    """
+async def make_api_request(
+    method: str,
+    endpoint: str,
+    data: Optional[dict] = None,
+    params: Optional[dict] = None
+) -> dict:
+    """Make authenticated request to ScreenApp API"""
+    url = f"{SCREENAPP_API_BASE}{endpoint}"
+    headers = await get_headers()
     
-    async def event_stream():
-        """Stream events from upstream MCP server"""
-        try:
-            async with httpx.AsyncClient(timeout=None) as client:
-                async with client.stream(
-                    "GET",
-                    f"{SCREENAPP_MCP_URL}/sse",
-                    headers=get_headers()
-                ) as response:
-                    async for line in response.aiter_lines():
-                        if line:
-                            yield f"{line}\n"
-                        else:
-                            yield "\n"
-                            
-        except httpx.HTTPError as e:
-            error_message = {
-                "jsonrpc": "2.0",
-                "method": "notifications/error",
-                "params": {
-                    "error": f"Upstream error: {str(e)}"
-                }
-            }
-            yield f"event: error\ndata: {json.dumps(error_message)}\n\n"
-        except Exception as e:
-            error_message = {
-                "jsonrpc": "2.0",
-                "method": "notifications/error",
-                "params": {
-                    "error": str(e)
-                }
-            }
-            yield f"event: error\ndata: {json.dumps(error_message)}\n\n"
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        if method == "GET":
+            response = await client.get(url, headers=headers, params=params)
+        elif method == "POST":
+            response = await client.post(url, headers=headers, json=data)
+        elif method == "DELETE":
+            response = await client.delete(url, headers=headers, json=data)
+        
+        response.raise_for_status()
+        return response.json()
+
+# Tools (same as before but without context.auth)
+@mcp.tool()
+async def get_profile() -> dict:
+    """Get the current user's ScreenApp profile information"""
+    return await make_api_request("GET", "/user/v1/profile")
+
+@mcp.tool()
+async def list_teams() -> dict:
+    """List all teams the user belongs to"""
+    return await make_api_request("GET", "/team/v1")
+
+@mcp.tool()
+async def list_recordings(team_id: str, limit: int = 20, offset: int = 0) -> dict:
+    """List recordings from a team
     
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache, no-transform",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-            "Access-Control-Allow-Origin": "*",
-            "Content-Type": "text/event-stream"
-        }
-    )
-
-
-@app.post("/sse")
-async def sse_handler_post(request: Request):
+    Args:
+        team_id: The team ID
+        limit: Number of recordings (default: 20)
+        offset: Pagination offset (default: 0)
     """
-    Proxy SSE POST requests to official ScreenApp MCP
+    params = {"limit": limit, "offset": offset}
+    return await make_api_request("GET", f"/file/v1/list/{team_id}", params=params)
+
+@mcp.tool()
+async def search_recordings(team_id: str, query: str) -> dict:
+    """Search recordings by query
+    
+    Args:
+        team_id: The team ID
+        query: Search query
     """
-    try:
-        # Get request body
-        body = await request.body()
-        
-        # Forward to upstream MCP
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(
-                f"{SCREENAPP_MCP_URL}/sse",
-                headers=get_headers(),
-                content=body
-            )
-            response.raise_for_status()
-            return response.json()
-            
-    except httpx.HTTPError as e:
-        return JSONResponse(
-            status_code=getattr(e.response, 'status_code', 500),
-            content={
-                "jsonrpc": "2.0",
-                "error": {
-                    "code": -32603,
-                    "message": f"Upstream error: {str(e)}"
-                }
-            }
-        )
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "jsonrpc": "2.0",
-                "error": {
-                    "code": -32603,
-                    "message": f"Internal error: {str(e)}"
-                }
-            }
-        )
+    data = {"query": query}
+    return await make_api_request("POST", f"/file/v1/search/{team_id}", data=data)
 
-
-@app.post("/message")
-async def handle_message(request: Request):
+@mcp.tool()
+async def ask_recording(file_id: str, question: str) -> dict:
+    """Ask AI about a recording
+    
+    Args:
+        file_id: The recording ID
+        question: Question to ask
     """
-    Proxy message requests to official ScreenApp MCP
-    """
-    try:
-        # Get request body
-        body = await request.json()
-        
-        # Forward to upstream MCP
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(
-                f"{SCREENAPP_MCP_URL}/message",
-                headers=get_headers(),
-                json=body
-            )
-            response.raise_for_status()
-            return response.json()
-            
-    except httpx.HTTPError as e:
-        return JSONResponse(
-            status_code=getattr(e.response, 'status_code', 500),
-            content={
-                "jsonrpc": "2.0",
-                "error": {
-                    "code": -32603,
-                    "message": f"Upstream error: {str(e)}"
-                }
-            }
-        )
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "jsonrpc": "2.0",
-                "error": {
-                    "code": -32603,
-                    "message": f"Internal error: {str(e)}"
-                }
-            }
-        )
-
-
-# ============================================================================
-# Run Server
-# ============================================================================
+    data = {"question": question}
+    return await make_api_request("POST", f"/file/v1/{file_id}/ask", data=data)
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
+    import uvicorn
     
     if not SCREENAPP_API_KEY:
-        print("❌ ERROR: SCREENAPP_API_KEY environment variable is not set")
+        logger.error("❌ SCREENAPP_API_KEY must be set")
         import sys
         sys.exit(1)
     
-    print(f"🚀 Starting ScreenApp MCP Proxy Server on port {port}")
-    print(f"📡 Upstream MCP: {SCREENAPP_MCP_URL}")
-    print(f"✅ API Key configured")
+    logger.info("🚀 Starting ScreenApp MCP Server")
     
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=port,
-        log_level="info",
-        access_log=True
-    )
+    app = mcp.http_app()
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
