@@ -1,4 +1,3 @@
-# Dockerfile
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -7,11 +6,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application
+# Copy application files
 COPY server.py .
+COPY run.py .
 
 # Expose port (Zeabur will set PORT env var)
 ENV PORT=8000
 
-# Run the MCP server
-CMD uvicorn server:mcp.app --host 0.0.0.0 --port ${PORT}
+# Run the application
+CMD ["python", "run.py"]
