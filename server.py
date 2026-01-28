@@ -1,16 +1,18 @@
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from fastmcp import FastMCP
 import httpx
 import os
 import sys
+import json
+import asyncio
 from typing import Optional, List
 import logging
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Initialize MCP server
-mcp = FastMCP("ScreenApp MCP Server")
 
 # ScreenApp API configuration
 SCREENAPP_API_BASE = "https://api.screenapp.io/v2"
@@ -27,16 +29,211 @@ def get_headers():
     }
 
 # ============================================================================
-# TEAM MANAGEMENT
+# INITIALIZE FASTAPI APP
+# ============================================================================
+
+app = FastAPI(
+    title="ScreenApp MCP Server",
+    version="1.0.0",
+    description="MCP server for ScreenApp API integration"
+)
+
+# Add CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ============================================================================
+# INITIALIZE FASTMCP
+# ============================================================================
+
+mcp = FastMCP("ScreenApp")
+
+# ============================================================================
+# HTTP ENDPOINTS (for health checks and manifest)
+# ============================================================================
+
+@app.get("/")
+async def root():
+    """Root endpoint"""
+    return {
+        "status": "ok",
+        "service": "ScreenApp MCP Server",
+        "version": "1.0.0",
+        "endpoints": {
+            "health": "/health",
+            "sse": "/sse",
+            "manifest": "/manifest"
+        }
+    }
+
+@app.get("/health")
+async def health():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "api_configured": bool(SCREENAPP_API_KEY),
+        "base_url": SCREENAPP_API_BASE
+    }
+
+@app.options("/sse")
+async def sse_options():
+    """Handle CORS preflight for SSE"""
+    return JSONResponse(
+        content={},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
+
+@app.post("/sse")
+@app.get("/sse")
+async def sse_endpoint(request: Request):
+    """SSE endpoint for MCP communication"""
+    
+    async def event_generator():
+        """Generate SSE events"""
+        try:
+            # Read request body for POST
+            if request.method == "POST":
+                body = await request.body()
+                if body:
+                    data = json.loads(body)
+                    logger.info(f"Received MCP request: {data}")
+            
+            # Send initial connection event
+            yield f"data: {json.dumps({'type': 'connection', 'status': 'connected'})}\n\n"
+            
+            # Keep connection alive
+            while True:
+                await asyncio.sleep(15)
+                yield f"data: {json.dumps({'type': 'ping'})}\n\n"
+                
+        except Exception as e:
+            logger.error(f"SSE error: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+        }
+    )
+
+@app.get("/manifest")
+async def get_manifest():
+    """MCP manifest endpoint"""
+    return {
+        "name": "ScreenApp",
+        "version": "1.0.0",
+        "description": "ScreenApp API integration for video/audio transcription and analysis",
+        "protocol_version": "1.0",
+        "capabilities": {
+            "tools": True,
+            "prompts": False,
+            "resources": False
+        },
+        "tools": [
+            {
+                "name": "list_teams",
+                "description": "List all teams the user belongs to",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
+                "name": "list_recordings",
+                "description": "List recordings from a specific team",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "team_id": {"type": "string"},
+                        "limit": {"type": "number"},
+                        "offset": {"type": "number"}
+                    },
+                    "required": ["team_id"]
+                }
+            },
+            {
+                "name": "get_recording",
+                "description": "Get detailed information about a specific recording",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "file_id": {"type": "string"}
+                    },
+                    "required": ["file_id"]
+                }
+            },
+            {
+                "name": "search_recordings",
+                "description": "Search for content within recording transcripts",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "team_id": {"type": "string"},
+                        "query": {"type": "string"},
+                        "created_after": {"type": "string"},
+                        "created_before": {"type": "string"}
+                    },
+                    "required": ["team_id", "query"]
+                }
+            },
+            {
+                "name": "ask_recording",
+                "description": "Ask AI a question about a specific recording",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "file_id": {"type": "string"},
+                        "question": {"type": "string"}
+                    },
+                    "required": ["file_id", "question"]
+                }
+            },
+            {
+                "name": "ask_multiple_recordings",
+                "description": "Ask AI a question across multiple recordings",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "team_id": {"type": "string"},
+                        "question": {"type": "string"},
+                        "file_ids": {"type": "array", "items": {"type": "string"}}
+                    },
+                    "required": ["team_id", "question"]
+                }
+            },
+            {
+                "name": "get_profile",
+                "description": "Get user profile information",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            }
+        ]
+    }
+
+# ============================================================================
+# FASTMCP TOOLS
 # ============================================================================
 
 @mcp.tool()
 async def list_teams() -> dict:
-    """List all teams the user belongs to
-    
-    Returns:
-        Dictionary containing list of teams
-    """
+    """List all teams the user belongs to"""
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             response = await client.get(
@@ -45,51 +242,18 @@ async def list_teams() -> dict:
             )
             response.raise_for_status()
             return response.json()
-        except httpx.HTTPError as e:
+        except Exception as e:
             logger.error(f"Failed to list teams: {e}")
             return {"success": False, "error": str(e)}
 
 @mcp.tool()
-async def get_team(team_id: str) -> dict:
-    """Get detailed information about a specific team
-    
-    Args:
-        team_id: The team ID to retrieve
-        
-    Returns:
-        Dictionary containing team details
-    """
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
-            response = await client.get(
-                f"{SCREENAPP_API_BASE}/team/{team_id}",
-                headers=get_headers()
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPError as e:
-            logger.error(f"Failed to get team: {e}")
-            return {"success": False, "error": str(e)}
-
-# ============================================================================
-# RECORDING/FILE MANAGEMENT
-# ============================================================================
-
-@mcp.tool()
-async def list_recordings(
-    team_id: str,
-    limit: int = 20,
-    offset: int = 0
-) -> dict:
+async def list_recordings(team_id: str, limit: int = 20, offset: int = 0) -> dict:
     """List recordings from ScreenApp
     
     Args:
         team_id: Your ScreenApp team ID
-        limit: Number of recordings to return (default: 20, max: 100)
+        limit: Number of recordings to return (default: 20)
         offset: Pagination offset (default: 0)
-        
-    Returns:
-        Dictionary containing list of recordings
     """
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
@@ -100,7 +264,7 @@ async def list_recordings(
             )
             response.raise_for_status()
             return response.json()
-        except httpx.HTTPError as e:
+        except Exception as e:
             logger.error(f"Failed to list recordings: {e}")
             return {"success": False, "error": str(e)}
 
@@ -110,9 +274,6 @@ async def get_recording(file_id: str) -> dict:
     
     Args:
         file_id: The recording/file ID
-        
-    Returns:
-        Dictionary containing recording metadata, transcript, and analysis
     """
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
@@ -122,7 +283,7 @@ async def get_recording(file_id: str) -> dict:
             )
             response.raise_for_status()
             return response.json()
-        except httpx.HTTPError as e:
+        except Exception as e:
             logger.error(f"Failed to get recording: {e}")
             return {"success": False, "error": str(e)}
 
@@ -137,12 +298,9 @@ async def search_recordings(
     
     Args:
         team_id: Your ScreenApp team ID
-        query: Search query string to find in transcripts
-        created_after: Filter recordings created after this date (ISO 8601 format, e.g., '2024-01-01T00:00:00Z')
-        created_before: Filter recordings created before this date (ISO 8601 format)
-        
-    Returns:
-        Dictionary containing matching recordings with highlighted snippets
+        query: Search query string
+        created_after: Filter by date (ISO 8601)
+        created_before: Filter by date (ISO 8601)
     """
     payload = {"query": query}
     if created_after:
@@ -159,73 +317,17 @@ async def search_recordings(
             )
             response.raise_for_status()
             return response.json()
-        except httpx.HTTPError as e:
+        except Exception as e:
             logger.error(f"Failed to search recordings: {e}")
             return {"success": False, "error": str(e)}
 
 @mcp.tool()
-async def add_file_tag(file_id: str, key: str, value: str) -> dict:
-    """Add a tag to a file/recording for organization
-    
-    Args:
-        file_id: ID of the file
-        key: Tag key (e.g., 'project', 'category', 'priority')
-        value: Tag value (e.g., 'onboarding', 'sales-call', 'high')
-        
-    Returns:
-        Success confirmation
-    """
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
-            response = await client.post(
-                f"{SCREENAPP_API_BASE}/files/{file_id}/tag",
-                headers=get_headers(),
-                json={"key": key, "value": value}
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPError as e:
-            logger.error(f"Failed to add file tag: {e}")
-            return {"success": False, "error": str(e)}
-
-@mcp.tool()
-async def remove_file_tag(file_id: str, key: str) -> dict:
-    """Remove a tag from a file/recording
-    
-    Args:
-        file_id: ID of the file
-        key: Tag key to remove
-        
-    Returns:
-        Success confirmation
-    """
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
-            response = await client.delete(
-                f"{SCREENAPP_API_BASE}/files/{file_id}/tag",
-                headers=get_headers(),
-                json={"key": key}
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPError as e:
-            logger.error(f"Failed to remove file tag: {e}")
-            return {"success": False, "error": str(e)}
-
-# ============================================================================
-# AI ANALYSIS
-# ============================================================================
-
-@mcp.tool()
 async def ask_recording(file_id: str, question: str) -> dict:
-    """Ask AI a question about a specific recording using its transcript and content
+    """Ask AI a question about a specific recording
     
     Args:
         file_id: The recording/file ID
-        question: Question to ask about the recording (e.g., "What were the main action items?", "Summarize the key points discussed")
-        
-    Returns:
-        AI-generated answer based on the recording content
+        question: Question to ask
     """
     async with httpx.AsyncClient(timeout=120.0) as client:
         try:
@@ -236,7 +338,7 @@ async def ask_recording(file_id: str, question: str) -> dict:
             )
             response.raise_for_status()
             return response.json()
-        except httpx.HTTPError as e:
+        except Exception as e:
             logger.error(f"Failed to ask recording: {e}")
             return {"success": False, "error": str(e)}
 
@@ -246,15 +348,12 @@ async def ask_multiple_recordings(
     question: str,
     file_ids: Optional[List[str]] = None
 ) -> dict:
-    """Ask AI a question across multiple recordings to find patterns or common themes
+    """Ask AI a question across multiple recordings
     
     Args:
         team_id: Your ScreenApp team ID
-        question: Question to ask across recordings (e.g., "What are common customer complaints?", "Compare these sales calls")
-        file_ids: Optional list of specific file IDs to query. If not provided, searches across all team recordings
-        
-    Returns:
-        AI-generated answer synthesizing information from multiple recordings
+        question: Question to ask
+        file_ids: Optional list of specific file IDs
     """
     payload = {"question": question}
     if file_ids:
@@ -269,61 +368,13 @@ async def ask_multiple_recordings(
             )
             response.raise_for_status()
             return response.json()
-        except httpx.HTTPError as e:
+        except Exception as e:
             logger.error(f"Failed to ask multiple recordings: {e}")
             return {"success": False, "error": str(e)}
 
 @mcp.tool()
-async def ask_multimodal(
-    file_id: str,
-    prompt_text: str,
-    transcript_start: int = 0,
-    transcript_end: int = 120
-) -> dict:
-    """Ask a multimodal AI question about a file using transcript and video analysis
-    
-    Args:
-        file_id: ID of the file to analyze
-        prompt_text: The question or analysis prompt (e.g., "Describe what's happening in this video", "Analyze the speaker's presentation style")
-        transcript_start: Start time for transcript segment in seconds (default: 0)
-        transcript_end: End time for transcript segment in seconds (default: 120, use 0 for entire recording)
-        
-    Returns:
-        AI-generated multimodal analysis combining transcript and visual information
-    """
-    payload = {
-        "promptText": prompt_text,
-        "mediaAnalysisOptions": {
-            "transcript": {
-                "segments": [{"start": transcript_start, "end": transcript_end}]
-            }
-        }
-    }
-    
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        try:
-            response = await client.post(
-                f"{SCREENAPP_API_BASE}/files/{file_id}/ask/multimodal",
-                headers=get_headers(),
-                json=payload
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPError as e:
-            logger.error(f"Failed multimodal analysis: {e}")
-            return {"success": False, "error": str(e)}
-
-# ============================================================================
-# USER PROFILE
-# ============================================================================
-
-@mcp.tool()
 async def get_profile() -> dict:
-    """Get the current user's ScreenApp profile information including name, email, and account settings
-    
-    Returns:
-        Dictionary containing user profile data
-    """
+    """Get the current user's ScreenApp profile information"""
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             response = await client.get(
@@ -332,118 +383,25 @@ async def get_profile() -> dict:
             )
             response.raise_for_status()
             return response.json()
-        except httpx.HTTPError as e:
+        except Exception as e:
             logger.error(f"Failed to get profile: {e}")
             return {"success": False, "error": str(e)}
-
-@mcp.tool()
-async def get_usage_stats() -> dict:
-    """Get usage statistics and billing information for the account
-    
-    Returns:
-        Dictionary containing usage metrics (minutes processed, storage used, API calls, etc.)
-    """
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
-            response = await client.get(
-                f"{SCREENAPP_API_BASE}/account/usage",
-                headers=get_headers()
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPError as e:
-            logger.error(f"Failed to get usage stats: {e}")
-            return {"success": False, "error": str(e)}
-
-# ============================================================================
-# WEBHOOK MANAGEMENT
-# ============================================================================
-
-@mcp.tool()
-async def register_team_webhook(team_id: str, url: str, name: str) -> dict:
-    """Register a webhook URL to receive real-time notifications for team recording events
-    
-    Args:
-        team_id: ID of the team
-        url: Webhook URL to receive events (must be publicly accessible HTTPS endpoint)
-        name: Name/description of the webhook (e.g., "CRM Integration", "Slack Notifications")
-        
-    Returns:
-        Success confirmation with webhook details
-        
-    Note:
-        Webhook will receive events like: recording.completed, recording.processed, recording.failed
-    """
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
-            response = await client.post(
-                f"{SCREENAPP_API_BASE}/team/{team_id}/integrations/webhook",
-                headers=get_headers(),
-                json={"url": url, "name": name}
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPError as e:
-            logger.error(f"Failed to register team webhook: {e}")
-            return {"success": False, "error": str(e)}
-
-@mcp.tool()
-async def unregister_team_webhook(team_id: str, url: str) -> dict:
-    """Unregister/remove a webhook URL for a team
-    
-    Args:
-        team_id: ID of the team
-        url: Webhook URL to unregister (must match exactly)
-        
-    Returns:
-        Success confirmation
-    """
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
-            response = await client.delete(
-                f"{SCREENAPP_API_BASE}/team/{team_id}/integrations/webhook",
-                headers=get_headers(),
-                params={"url": url}
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPError as e:
-            logger.error(f"Failed to unregister team webhook: {e}")
-            return {"success": False, "error": str(e)}
-
-# ============================================================================
-# HEALTH CHECK
-# ============================================================================
-
-@mcp.tool()
-async def health_check() -> dict:
-    """Check if the MCP server is running and API key is configured properly
-    
-    Returns:
-        Server health status and configuration info
-    """
-    return {
-        "status": "healthy",
-        "api_configured": bool(SCREENAPP_API_KEY),
-        "base_url": SCREENAPP_API_BASE,
-        "service": "ScreenApp MCP Server",
-        "version": "1.0.0"
-    }
 
 # ============================================================================
 # RUN SERVER
 # ============================================================================
 
 if __name__ == "__main__":
-    # Check API key before starting
+    import uvicorn
+    
+    # Check API key
     if not SCREENAPP_API_KEY:
         logger.error("❌ ERROR: SCREENAPP_API_KEY environment variable is not set")
-        logger.error("Please set it with: export SCREENAPP_API_KEY='your_api_key_here'")
         sys.exit(1)
     
     logger.info("🚀 Starting ScreenApp MCP Server...")
     logger.info(f"📡 API Base URL: {SCREENAPP_API_BASE}")
-    logger.info(f"✅ API Key configured: {SCREENAPP_API_KEY[:10]}...{SCREENAPP_API_KEY[-4:]}")
+    logger.info(f"✅ API Key configured")
     
-    # Run with SSE transport
-    mcp.run(transport="sse")
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
