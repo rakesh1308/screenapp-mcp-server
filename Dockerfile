@@ -6,12 +6,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application files
+# Copy application
 COPY server.py .
-COPY run.py .
 
-# Expose port (Zeabur will set PORT env var)
+# Expose port
 ENV PORT=8000
 
-# Run the application
-CMD ["python", "run.py"]
+# Run the server
+CMD ["python", "server.py"]
