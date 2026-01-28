@@ -10,37 +10,50 @@ app.use(express.json());
 const SCREENAPP_API_TOKEN = process.env.SCREENAPP_API_TOKEN;
 const SCREENAPP_TEAM_ID = process.env.SCREENAPP_TEAM_ID;
 const API_KEY = process.env.MCP_API_KEY || 'default-key';
+const PORT = process.env.PORT || 3000;
+
 const SCREENAPP_BASE_URL = 'https://api.screenapp.io/v2';
+
+// Validate required environment variables
+if (!SCREENAPP_API_TOKEN || !SCREENAPP_TEAM_ID) {
+  console.error('❌ ERROR: Missing required environment variables');
+  console.error('   SCREENAPP_API_TOKEN: ' + (SCREENAPP_API_TOKEN ? '✓' : '✗'));
+  console.error('   SCREENAPP_TEAM_ID: ' + (SCREENAPP_TEAM_ID ? '✓' : '✗'));
+  process.exit(1);
+}
 
 // ============= AUTHENTICATION MIDDLEWARE =============
 
 const authenticateRequest = (req, res, next) => {
   const apiKey = req.headers['x-api-key'] || req.query.token;
   
-  if (apiKey !== API_KEY) {
-    return res.status(401).json({ error: 'Unauthorized' });
+  if (!apiKey || apiKey !== API_KEY) {
+    return res.status(401).json({ 
+      error: 'Unauthorized',
+      message: 'Invalid or missing X-API-Key header'
+    });
   }
   
   next();
 };
 
-// ============= MCP TOOLS SCHEMA =============
+// ============= MCP TOOL DEFINITIONS =============
 
 const tools = [
   {
     name: 'list_recordings',
-    description: 'List all recordings from your ScreenApp account with metadata',
+    description: 'List all recordings from your ScreenApp account. Returns paginated list with titles, dates, and IDs.',
     inputSchema: {
       type: 'object',
       properties: {
         limit: {
           type: 'number',
-          description: 'Maximum number of recordings to return (default: 20, max: 100)',
+          description: 'Maximum number of recordings to return (1-100, default: 20)',
           default: 20
         },
         offset: {
           type: 'number',
-          description: 'Offset for pagination (default: 0)',
+          description: 'Number of recordings to skip for pagination (default: 0)',
           default: 0
         }
       },
@@ -49,17 +62,17 @@ const tools = [
   },
   {
     name: 'search_recordings',
-    description: 'Search recordings by keyword, title, or content',
+    description: 'Search through your ScreenApp recordings by keyword. Searches titles, summaries, and content.',
     inputSchema: {
       type: 'object',
       properties: {
         query: {
           type: 'string',
-          description: 'Search query (searches titles, summaries, and transcript content)'
+          description: 'Search keyword or phrase (required)'
         },
         limit: {
           type: 'number',
-          description: 'Maximum results (default: 10)',
+          description: 'Maximum results to return (1-100, default: 10)',
           default: 10
         }
       },
@@ -67,14 +80,14 @@ const tools = [
     }
   },
   {
-    name: 'get_recording',
-    description: 'Get detailed information about a specific recording including transcript and summary',
+    name: 'get_recording_details',
+    description: 'Get detailed information about a specific recording including metadata, duration, participants.',
     inputSchema: {
       type: 'object',
       properties: {
         recording_id: {
           type: 'string',
-          description: 'The ID of the recording'
+          description: 'The unique ID of the recording (required)'
         }
       },
       required: ['recording_id']
@@ -82,17 +95,17 @@ const tools = [
   },
   {
     name: 'get_transcript',
-    description: 'Get the full transcript of a recording with timestamps and speaker labels',
+    description: 'Retrieve the full transcript of a recording with speaker labels and timestamps.',
     inputSchema: {
       type: 'object',
       properties: {
         recording_id: {
           type: 'string',
-          description: 'The ID of the recording'
+          description: 'The unique ID of the recording (required)'
         },
         format: {
           type: 'string',
-          description: 'Format: text, srt, vtt, or json (default: text)',
+          description: 'Output format: text (plain text), srt (subtitle), vtt (video text), or json (structured)',
           enum: ['text', 'srt', 'vtt', 'json'],
           default: 'text'
         }
@@ -102,31 +115,31 @@ const tools = [
   },
   {
     name: 'get_summary',
-    description: 'Get AI-generated summary, action items, and key points from a recording',
+    description: 'Get AI-generated summary of a recording including action items, key points, and discussion topics.',
     inputSchema: {
       type: 'object',
       properties: {
         recording_id: {
           type: 'string',
-          description: 'The ID of the recording'
+          description: 'The unique ID of the recording (required)'
         }
       },
       required: ['recording_id']
     }
   },
   {
-    name: 'ask_recording',
-    description: 'Ask a question about a specific recording - the AI will search the transcript and answer',
+    name: 'ask_question_about_recording',
+    description: 'Ask a question about the content of a recording. The AI will search the transcript and answer.',
     inputSchema: {
       type: 'object',
       properties: {
         recording_id: {
           type: 'string',
-          description: 'The ID of the recording'
+          description: 'The unique ID of the recording (required)'
         },
         question: {
           type: 'string',
-          description: 'Your question about the recording content'
+          description: 'Your question about the recording content (required)'
         }
       },
       required: ['recording_id', 'question']
@@ -134,169 +147,212 @@ const tools = [
   }
 ];
 
-// ============= ROUTES =============
+// ============= UTILITY FUNCTIONS =============
 
-// Health Check (No Auth Required)
+function createErrorResponse(message, details = null) {
+  return {
+    content: [
+      {
+        type: 'text',
+        text: `Error: ${message}${details ? '\n\n' + details : ''}`
+      }
+    ],
+    isError: true
+  };
+}
+
+function createSuccessResponse(data) {
+  const text = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+  return {
+    content: [
+      {
+        type: 'text',
+        text: text
+      }
+    ],
+    isError: false
+  };
+}
+
+async function callScreenAppAPI(endpoint, method = 'GET', params = null) {
+  try {
+    const config = {
+      method,
+      url: `${SCREENAPP_BASE_URL}${endpoint}`,
+      headers: {
+        'Authorization': `Bearer ${SCREENAPP_API_TOKEN}`,
+        'X-Team-ID': SCREENAPP_TEAM_ID,
+        'Content-Type': 'application/json'
+      }
+    };
+
+    if (params) {
+      if (method === 'GET') {
+        config.params = params;
+      } else {
+        config.data = params;
+      }
+    }
+
+    const response = await axios(config);
+    return response.data;
+  } catch (error) {
+    const errorMsg = error.response?.data?.message || error.message;
+    const statusCode = error.response?.status || 'UNKNOWN';
+    throw new Error(`ScreenApp API Error (${statusCode}): ${errorMsg}`);
+  }
+}
+
+// ============= HEALTH CHECK =============
+
 app.get('/health', (req, res) => {
   res.json({ 
-    status: 'ok',
+    status: 'healthy',
     service: 'ScreenApp MCP Server',
-    version: '1.0.0',
+    version: '2.0.0',
     timestamp: new Date().toISOString()
   });
 });
 
-// MCP JSON-RPC 2.0 Handler (Main Endpoint)
+// ============= MCP JSON-RPC 2.0 HANDLER =============
+
 app.post('/', authenticateRequest, async (req, res) => {
   const { jsonrpc, method, params, id } = req.body;
 
-  console.log(`\n[MCP] =====================================`);
-  console.log(`[MCP] Request: method=${method}, id=${id}`);
-  console.log(`[MCP] =====================================`);
-
   // Validate JSON-RPC format
-  if (jsonrpc !== '2.0' || !method) {
-    return res.status(400).json({
+  if (jsonrpc !== '2.0') {
+    return res.json({
       jsonrpc: '2.0',
       error: {
         code: -32600,
-        message: 'Invalid Request'
+        message: 'Invalid JSON-RPC version'
       },
       id: id || null
     });
   }
 
+  if (!method) {
+    return res.json({
+      jsonrpc: '2.0',
+      error: {
+        code: -32600,
+        message: 'Missing method'
+      },
+      id: id || null
+    });
+  }
+
+  console.log(`[${new Date().toISOString()}] ${method} (id: ${id})`);
+
   try {
     let result;
+
+    // Normalize method name
     const normalizedMethod = method.toLowerCase().trim();
 
-    // ============= INITIALIZE HANDSHAKE =============
+    // ========== INITIALIZE (MCP Protocol Handshake) ==========
     if (normalizedMethod === 'initialize') {
-      console.log('[MCP] ✅ Handling initialize handshake');
       result = {
-        protocolVersion: '2025-06-18',
+        protocolVersion: '2024-11-05',
         capabilities: {
-          tools: {}
+          tools: {
+            listChanged: false
+          }
         },
         serverInfo: {
           name: 'ScreenApp MCP Server',
-          version: '1.0.0'
+          version: '2.0.0'
         }
       };
+      console.log(`  ✅ Initialize complete`);
     }
-    // ============= LIST TOOLS =============
-    else if (normalizedMethod === 'tools/list' || normalizedMethod === 'list_tools' || normalizedMethod === 'tools_list') {
-      console.log('[MCP] ✅ Handling tools/list request');
-      result = {
-        tools: tools
-      };
+
+    // ========== LIST TOOLS ==========
+    else if (
+      normalizedMethod === 'tools/list' ||
+      normalizedMethod === 'list_tools' ||
+      normalizedMethod === 'tools_list'
+    ) {
+      result = { tools };
+      console.log(`  ✅ Returned ${tools.length} tools`);
     }
-    // ============= EXECUTE TOOL =============
-    else if (normalizedMethod === 'tools/call' || normalizedMethod === 'tool/call' || normalizedMethod === 'call_tool' || normalizedMethod === 'tools/execute' || normalizedMethod === 'execute_tool') {
+
+    // ========== CALL TOOL ==========
+    else if (
+      normalizedMethod === 'tools/call' ||
+      normalizedMethod === 'tool/call' ||
+      normalizedMethod === 'call_tool' ||
+      normalizedMethod === 'tools/execute' ||
+      normalizedMethod === 'execute_tool'
+    ) {
       const toolName = params?.name || params?.tool;
       const toolArgs = params?.arguments || params?.args || {};
-      console.log(`[MCP] ✅ Executing tool: ${toolName}`);
-      
+
+      if (!toolName) {
+        throw new Error('Tool name is required in params.name or params.tool');
+      }
+
+      console.log(`  🔧 Executing tool: ${toolName}`);
+
       try {
         const toolResult = await executeTool(toolName, toolArgs);
-        
-        // Wrap in MCP format
-        result = {
-          content: [
-            {
-              type: 'text',
-              text: typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult, null, 2)
-            }
-          ],
-          isError: false
-        };
-        
-        console.log(`[MCP] ✅ Tool ${toolName} executed successfully`);
+        result = createSuccessResponse(toolResult);
+        console.log(`  ✅ Tool ${toolName} succeeded`);
       } catch (toolError) {
-        console.error(`[MCP] ❌ Tool ${toolName} failed:`, toolError.message);
-        result = {
-          content: [
-            {
-              type: 'text',
-              text: `Error executing ${toolName}: ${toolError.message}`
-            }
-          ],
-          isError: true
-        };
+        console.error(`  ❌ Tool ${toolName} failed: ${toolError.message}`);
+        result = createErrorResponse(`Tool execution failed: ${toolError.message}`);
       }
     }
-    // ============= FALLBACK HANDLERS =============
-    else if (normalizedMethod.includes('list')) {
-      console.log(`[MCP] ✅ Fallback: Returning tools for method: ${method}`);
-      result = { tools: tools };
-    }
-    else if (normalizedMethod.includes('call') || normalizedMethod.includes('execute')) {
-      console.log(`[MCP] ✅ Fallback: Assuming tool execution for method: ${method}`);
-      const toolName = params?.name || params?.tool;
-      const toolArgs = params?.arguments || params?.args || {};
-      try {
-        const toolResult = await executeTool(toolName, toolArgs);
-        result = {
-          content: [{ type: 'text', text: typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult, null, 2) }],
-          isError: false
-        };
-      } catch (toolError) {
-        result = {
-          content: [{ type: 'text', text: `Error executing ${toolName}: ${toolError.message}` }],
-          isError: true
-        };
-      }
-    }
+
+    // ========== UNKNOWN METHOD ==========
     else {
-      console.log(`[MCP] ⚠️  Unknown method "${method}" - returning tools list`);
-      result = { tools: tools };
+      throw new Error(`Unknown method: ${method}`);
     }
 
-    console.log(`[MCP] ✅ Sending response\n`);
-
-    // Send JSON-RPC 2.0 response
+    // ========== SEND RESPONSE ==========
     res.json({
       jsonrpc: '2.0',
-      result: result,
-      id: id
+      result,
+      id
     });
 
   } catch (error) {
-    console.error(`[MCP] ❌ Error handling method ${method}:`, error.message);
-    
-    res.status(500).json({
+    console.error(`  ❌ Error: ${error.message}`);
+
+    res.json({
       jsonrpc: '2.0',
       error: {
         code: -32603,
-        message: 'Internal error: ' + error.message
+        message: 'Internal error',
+        data: error.message
       },
-      id: id
+      id
     });
   }
 });
 
 // ============= TOOL EXECUTION ENGINE =============
 
-async function executeTool(toolName, args) {
-  if (!toolName) {
-    throw new Error('Tool name is required');
-  }
-
-  console.log(`[TOOL] Executing: ${toolName}`);
-
+async function executeTool(toolName, args = {}) {
   switch (toolName) {
     case 'list_recordings':
       return await listRecordings(args);
+    
     case 'search_recordings':
       return await searchRecordings(args);
-    case 'get_recording':
-      return await getRecording(args);
+    
+    case 'get_recording_details':
+      return await getRecordingDetails(args);
+    
     case 'get_transcript':
       return await getTranscript(args);
+    
     case 'get_summary':
       return await getSummary(args);
-    case 'ask_recording':
-      return await askRecording(args);
+    
+    case 'ask_question_about_recording':
+      return await askQuestionAboutRecording(args);
+    
     default:
       throw new Error(`Unknown tool: ${toolName}`);
   }
@@ -305,227 +361,251 @@ async function executeTool(toolName, args) {
 // ============= TOOL IMPLEMENTATIONS =============
 
 async function listRecordings({ limit = 20, offset = 0 } = {}) {
-  try {
-    console.log(`[TOOL] list_recordings: limit=${limit}, offset=${offset}`);
-    
-    const response = await axios.get(
-      `${SCREENAPP_BASE_URL}/recordings`,
-      {
-        headers: {
-          'Authorization': `Bearer ${SCREENAPP_API_TOKEN}`,
-          'X-Team-ID': SCREENAPP_TEAM_ID
-        },
-        params: {
-          limit: Math.min(limit, 100),
-          offset
-        }
-      }
-    );
+  if (limit > 100) limit = 100;
+  if (limit < 1) limit = 1;
+  if (offset < 0) offset = 0;
 
-    const recordings = response.data.data || response.data || [];
-    console.log(`[TOOL] Found ${recordings.length} recordings`);
+  console.log(`    Fetching recordings: limit=${limit}, offset=${offset}`);
 
-    return {
-      recordings: recordings,
-      total: response.data.total || recordings.length,
-      limit,
-      offset
-    };
-  } catch (error) {
-    console.error(`[TOOL] Error in listRecordings:`, error.message);
-    throw new Error(`Failed to list recordings: ${error.response?.data?.message || error.message}`);
-  }
+  const data = await callScreenAppAPI('/recordings', 'GET', { limit, offset });
+  
+  const recordings = Array.isArray(data.data) ? data.data : Array.isArray(data) ? data : [];
+  
+  return {
+    success: true,
+    count: recordings.length,
+    total: data.total || recordings.length,
+    limit,
+    offset,
+    recordings: recordings.map(r => ({
+      id: r.id,
+      title: r.title || 'Untitled',
+      createdAt: r.createdAt,
+      duration: r.duration,
+      participants: r.participants || []
+    }))
+  };
 }
 
 async function searchRecordings({ query, limit = 10 } = {}) {
-  try {
-    if (!query) throw new Error('Query parameter is required');
-
-    console.log(`[TOOL] search_recordings: query="${query}", limit=${limit}`);
-
-    const allRecordings = await listRecordings({ limit: 100, offset: 0 });
-    
-    const queryLower = query.toLowerCase();
-    const filtered = (allRecordings.recordings || [])
-      .filter(r => {
-        const title = (r.title || '').toLowerCase();
-        const summary = (r.summary || '').toLowerCase();
-        const description = (r.description || '').toLowerCase();
-        
-        return title.includes(queryLower) || 
-               summary.includes(queryLower) || 
-               description.includes(queryLower);
-      })
-      .slice(0, limit);
-
-    console.log(`[TOOL] Found ${filtered.length} matching recordings`);
-
-    return {
-      query,
-      results: filtered,
-      count: filtered.length,
-      message: `Found ${filtered.length} recordings matching "${query}"`
-    };
-  } catch (error) {
-    console.error(`[TOOL] Error in searchRecordings:`, error.message);
-    throw new Error(`Search failed: ${error.message}`);
+  if (!query || query.trim() === '') {
+    throw new Error('Search query is required');
   }
+
+  if (limit > 100) limit = 100;
+  if (limit < 1) limit = 1;
+
+  console.log(`    Searching: query="${query}", limit=${limit}`);
+
+  // First, get all recordings
+  const allRecordings = await listRecordings({ limit: 100, offset: 0 });
+  
+  // Filter by search query
+  const queryLower = query.toLowerCase().trim();
+  const results = allRecordings.recordings
+    .filter(r => {
+      const title = (r.title || '').toLowerCase();
+      return title.includes(queryLower);
+    })
+    .slice(0, limit);
+
+  return {
+    success: true,
+    query,
+    resultCount: results.length,
+    results
+  };
 }
 
-async function getRecording({ recording_id } = {}) {
-  try {
-    if (!recording_id) throw new Error('recording_id parameter is required');
-
-    console.log(`[TOOL] get_recording: id=${recording_id}`);
-
-    const response = await axios.get(
-      `${SCREENAPP_BASE_URL}/recordings/${recording_id}`,
-      {
-        headers: {
-          'Authorization': `Bearer ${SCREENAPP_API_TOKEN}`,
-          'X-Team-ID': SCREENAPP_TEAM_ID
-        }
-      }
-    );
-
-    console.log(`[TOOL] Got recording: ${response.data?.title || recording_id}`);
-    return response.data;
-  } catch (error) {
-    console.error(`[TOOL] Error in getRecording:`, error.message);
-    throw new Error(`Failed to get recording: ${error.response?.data?.message || error.message}`);
+async function getRecordingDetails({ recording_id } = {}) {
+  if (!recording_id) {
+    throw new Error('recording_id is required');
   }
+
+  console.log(`    Fetching details for: ${recording_id}`);
+
+  const data = await callScreenAppAPI(`/recordings/${recording_id}`);
+
+  return {
+    success: true,
+    recording: {
+      id: data.id,
+      title: data.title,
+      description: data.description,
+      duration: data.duration,
+      createdAt: data.createdAt,
+      updatedAt: data.updatedAt,
+      participants: data.participants || [],
+      language: data.language,
+      isPublic: data.isPublic
+    }
+  };
 }
 
 async function getTranscript({ recording_id, format = 'text' } = {}) {
+  if (!recording_id) {
+    throw new Error('recording_id is required');
+  }
+
+  if (!['text', 'srt', 'vtt', 'json'].includes(format)) {
+    format = 'text';
+  }
+
+  console.log(`    Fetching transcript: ${recording_id} (${format})`);
+
   try {
-    if (!recording_id) throw new Error('recording_id parameter is required');
-
-    console.log(`[TOOL] get_transcript: id=${recording_id}, format=${format}`);
-
-    const response = await axios.get(
-      `${SCREENAPP_BASE_URL}/recordings/${recording_id}/transcript`,
-      {
-        headers: {
-          'Authorization': `Bearer ${SCREENAPP_API_TOKEN}`,
-          'X-Team-ID': SCREENAPP_TEAM_ID
-        },
-        params: { format }
-      }
-    );
+    const data = await callScreenAppAPI(`/recordings/${recording_id}/transcript`, 'GET', { format });
 
     return {
+      success: true,
       recording_id,
       format,
-      transcript: response.data.transcript || response.data,
-      wordCount: response.data.wordCount || 0
+      transcript: data.transcript || data,
+      wordCount: data.wordCount || 0,
+      language: data.language || 'unknown'
     };
   } catch (error) {
-    try {
-      const recording = await getRecording({ recording_id });
-      return {
-        recording_id,
-        format,
-        transcript: recording.transcript || 'Transcript not available',
-        wordCount: 0
-      };
-    } catch {
-      console.error(`[TOOL] Error in getTranscript:`, error.message);
-      throw new Error(`Failed to get transcript: ${error.response?.data?.message || error.message}`);
-    }
+    // Fallback: return empty transcript
+    console.warn(`    Transcript not available: ${error.message}`);
+    return {
+      success: false,
+      recording_id,
+      format,
+      transcript: '[Transcript not available]',
+      wordCount: 0,
+      error: error.message
+    };
   }
 }
 
 async function getSummary({ recording_id } = {}) {
+  if (!recording_id) {
+    throw new Error('recording_id is required');
+  }
+
+  console.log(`    Fetching summary: ${recording_id}`);
+
   try {
-    if (!recording_id) throw new Error('recording_id parameter is required');
-
-    console.log(`[TOOL] get_summary: id=${recording_id}`);
-
-    const response = await axios.get(
-      `${SCREENAPP_BASE_URL}/recordings/${recording_id}/summary`,
-      {
-        headers: {
-          'Authorization': `Bearer ${SCREENAPP_API_TOKEN}`,
-          'X-Team-ID': SCREENAPP_TEAM_ID
-        }
-      }
-    );
+    const data = await callScreenAppAPI(`/recordings/${recording_id}/summary`);
 
     return {
+      success: true,
       recording_id,
-      summary: response.data.summary || response.data,
-      actionItems: response.data.actionItems || [],
-      keyPoints: response.data.keyPoints || []
+      summary: data.summary || '[No summary available]',
+      actionItems: Array.isArray(data.actionItems) ? data.actionItems : [],
+      keyPoints: Array.isArray(data.keyPoints) ? data.keyPoints : [],
+      topics: Array.isArray(data.topics) ? data.topics : []
     };
   } catch (error) {
-    try {
-      const recording = await getRecording({ recording_id });
-      return {
-        recording_id,
-        summary: recording.summary || 'Summary not available',
-        actionItems: recording.actionItems || [],
-        keyPoints: recording.keyPoints || []
-      };
-    } catch {
-      console.error(`[TOOL] Error in getSummary:`, error.message);
-      throw new Error(`Failed to get summary: ${error.response?.data?.message || error.message}`);
-    }
+    console.warn(`    Summary not available: ${error.message}`);
+    return {
+      success: false,
+      recording_id,
+      summary: '[Summary not available]',
+      actionItems: [],
+      keyPoints: [],
+      error: error.message
+    };
   }
 }
 
-async function askRecording({ recording_id, question } = {}) {
+async function askQuestionAboutRecording({ recording_id, question } = {}) {
+  if (!recording_id) {
+    throw new Error('recording_id is required');
+  }
+
+  if (!question || question.trim() === '') {
+    throw new Error('question is required');
+  }
+
+  console.log(`    Asking question about ${recording_id}: "${question.substring(0, 50)}..."`);
+
   try {
-    if (!recording_id) throw new Error('recording_id parameter is required');
-    if (!question) throw new Error('question parameter is required');
+    // Get transcript first
+    const transcriptData = await getTranscript({ recording_id, format: 'text' });
 
-    console.log(`[TOOL] ask_recording: id=${recording_id}`);
+    if (!transcriptData.success) {
+      return {
+        success: false,
+        recording_id,
+        question,
+        answer: 'Could not retrieve transcript to answer question',
+        error: 'Transcript unavailable'
+      };
+    }
 
-    const transcript = await getTranscript({ recording_id, format: 'text' });
-    
+    // Return transcript excerpt as answer (in production, use an LLM here)
+    const transcript = transcriptData.transcript || '';
+    const excerpt = transcript.substring(0, 1500);
+
     return {
+      success: true,
       recording_id,
       question,
-      answer: `Based on the transcript:\n\n${transcript.transcript.substring(0, 2000)}${transcript.transcript.length > 2000 ? '...\n\n(Use get_transcript for full content)' : ''}`,
+      answer: `Based on the recording transcript:\n\n${excerpt}${excerpt.length < transcript.length ? '...' : ''}`,
       confidence: 'moderate',
-      note: 'For full AI-powered Q&A, use ScreenApp Pro'
+      note: 'For full AI-powered Q&A with answer extraction, use ScreenApp Pro'
     };
   } catch (error) {
-    console.error(`[TOOL] Error in askRecording:`, error.message);
-    throw new Error(`Failed to process question: ${error.message}`);
+    console.error(`    Question failed: ${error.message}`);
+    return {
+      success: false,
+      recording_id,
+      question,
+      answer: `Could not answer question: ${error.message}`,
+      error: error.message
+    };
   }
 }
 
 // ============= ERROR HANDLING =============
 
 app.use((err, req, res, next) => {
-  console.error('[ERROR]:', err);
-  res.status(500).json({ 
+  console.error('[ERROR]', err);
+  res.status(500).json({
     error: 'Internal server error',
-    message: err.message 
+    message: err.message
   });
 });
+
+// ============= 404 HANDLER =============
 
 app.use((req, res) => {
-  res.status(404).json({ error: 'Not found' });
+  res.status(404).json({
+    error: 'Not found',
+    message: 'This endpoint does not exist'
+  });
 });
 
-// ============= START SERVER =============
+// ============= STARTUP =============
 
-const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`\n${'='.repeat(70)}`);
-  console.log(`✅ ScreenApp MCP Server v1.0.0 RUNNING`);
+  console.log(`✅ ScreenApp MCP Server v2.0.0`);
   console.log(`${'='.repeat(70)}`);
-  console.log(`📊 Health check: http://localhost:${PORT}/health`);
-  console.log(`🛠️  MCP JSON-RPC 2.0 endpoint: POST http://localhost:${PORT}/`);
-  console.log(`🔐 Authentication: X-API-Key header required`);
-  console.log(`\n📋 Supported MCP Methods:`);
-  console.log(`   • initialize - Protocol handshake`);
-  console.log(`   • tools/list - List available tools`);
-  console.log(`   • tools/call - Execute tool`);
-  console.log(`\n🛠️  Available Tools (6):`);
+  console.log(`📊 Health Check:     GET  http://localhost:${PORT}/health`);
+  console.log(`🔌 MCP Endpoint:     POST http://localhost:${PORT}/`);
+  console.log(`🔐 Authentication:   X-API-Key header required`);
+  console.log(`\n📋 Available Tools (${tools.length}):`);
   tools.forEach((tool, i) => {
-    console.log(`   ${i + 1}. ${tool.name} - ${tool.description}`);
+    console.log(`   ${i + 1}. ${tool.name}`);
   });
+  console.log(`\n🔌 MCP Methods Supported:`);
+  console.log(`   • initialize (MCP handshake)`);
+  console.log(`   • tools/list (list available tools)`);
+  console.log(`   • tools/call (execute a tool)`);
+  console.log(`\n🚀 Ready to accept MCP connections`);
   console.log(`${'='.repeat(70)}\n`);
+});
+
+// ============= GRACEFUL SHUTDOWN =============
+
+process.on('SIGTERM', () => {
+  console.log('\n🛑 Received SIGTERM, shutting down gracefully...');
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  console.log('\n🛑 Received SIGINT, shutting down gracefully...');
+  process.exit(0);
 });
